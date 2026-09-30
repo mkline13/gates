@@ -527,3 +527,183 @@ The resulting model is:
 ```
 
 The type system therefore establishes the foundation for the larger application-boundary runtime.
+
+---
+
+# MVP Decisions
+
+This part records how the MVP answers the questions the specification above leaves open. The decisions were agreed with the project owner on 2026-09-30. Each rule is enforced by the code in `src/types/` and pinned by the tests named next to it.
+
+## D1. Primitives
+
+| Type | Accepts | Rejects (examples) |
+| --- | --- | --- |
+| `string()` | any JavaScript string | numbers, `String` objects, `undefined` |
+| `number()` | finite numbers, including `-0` | `NaN`, `Infinity`, `-Infinity`, numeric strings, `bigint`, `Number` objects |
+| `boolean()` | `true`, `false` | `"true"`, `0`, `1`, `Boolean` objects |
+| `null()` | `null` | `undefined`, `0`, `""`, `false` |
+
+`null` is a reserved word, so the constructor is exported as both `nullType()` and `null` (use it as `t.null()` with a namespace import).
+
+No primitive accepts `undefined`. There is no `undefined` type.
+
+**Decision: `NaN` and `±Infinity` are rejected** (code `not_finite`).
+
+- Why: JSON cannot represent them, so a later transport adapter would silently turn them into `null`, which is the kind of coercion §9 forbids. `NaN !== NaN` also breaks equality and caching.
+- Cost: TypeScript's `number` includes these values, so the compiler accepts values the validator rejects. This is a runtime-only constraint (see D8).
+- Reversibility: easy. Relaxing a rule only accepts more values, so existing callers keep working. A separate type (for example `float()`) can be added later without changing `number()`.
+
+Tests: `tests/types/primitives.test.ts`.
+
+## D2. Structs
+
+A struct value must be a **plain object**: its prototype is `Object.prototype` or `null`. Arrays, class instances, `Date`, `Map` and the like are rejected as `invalid_type`.
+
+| Question (§6) | Decision |
+| --- | --- |
+| Unknown fields permitted? | **No.** Every own enumerable string-keyed property must be declared, or the value fails with `unknown_field`. Unknown fields are rejected, not stripped. |
+| Missing fields rejected? | **Yes**, for required fields (`missing_field`). Optional fields may be absent. |
+| May fields contain `undefined`? | **No.** A required field set to `undefined` is `invalid_type`. An optional field set to `undefined` is `undefined_field`. |
+| Is `null` distinct from absence? | **Yes.** `null` is accepted only where the field's type is `null()`. |
+| Is property order significant? | **No.** |
+| Are property names case-sensitive? | **Yes.** `Name` and `name` are different fields. |
+
+Other rules:
+
+- Symbol-keyed and non-enumerable properties are not fields. They are ignored and not copied into the validated value.
+- `__proto__` cannot be declared as a field name (`struct()` throws). In input, an own `__proto__` property is an unknown field.
+- `struct()` copies and freezes its field definitions, so changing the object passed to it later does not change the type.
+
+Tests: `tests/types/struct.test.ts`.
+
+## D3. Lists
+
+A list value must satisfy `Array.isArray`, and every element must satisfy the element type. Array-likes, `Set`s and strings are rejected. Holes in sparse arrays are read as `undefined`, which no element type accepts.
+
+Tests: `tests/types/struct.test.ts` ("list semantics").
+
+## D4. Optional
+
+`optional(T)` is a **struct field modifier**, not a type. It can only be used as a struct field, which is the only place a value can be absent. `list(optional(...))` and `optional(...).validate(...)` are compile errors, and throw at runtime.
+
+| Field state | `name: string()` | `nickname: optional(string())` |
+| --- | --- | --- |
+| absent | ✗ `missing_field` | ✓ |
+| `undefined` | ✗ `invalid_type` | ✗ `undefined_field` |
+| `null` | ✗ `invalid_type` | ✗ `invalid_type` |
+| a string | ✓ | ✓ |
+
+The compiler agrees because `tsconfig.json` enables `exactOptionalPropertyTypes`, which makes `nickname?: string` mean "absent or a string", not "absent, `undefined` or a string". Projects that use gates types should enable it too. Without it, the compiler accepts an explicit `undefined` that the validator rejects.
+
+Tests: `tests/types/struct.test.ts`, `tests/types/correspondence.test.ts`.
+
+## D5. Mutation and trust (§11)
+
+**Decision: validation returns a deep-frozen copy.**
+
+- `validate` reads the input exactly once and builds a fresh copy containing exactly the declared data. The copy is checked, deep-frozen and returned as `result.value`. Reading once means a getter cannot return one value to the check and a different one to the caller.
+- The caller's input is never modified or frozen. Later changes to the input do not affect the validated copy, and the copy cannot be changed at all. Writes throw a `TypeError` in strict-mode code, which includes all ES modules.
+- `Infer<>` types are deeply `readonly`: struct fields are `readonly` and lists are `readonly T[]`. The compiler rejects mutation before the runtime has to.
+- So the invariant in §11 holds directly: a validated value cannot be mutated into an invalid state.
+- To change a value, build a new one (`{ ...user, nickname: "Al" }`). A spread copies only the top level, so nested objects need their own spread. The new object is an ordinary unvalidated value until it passes a gate again, for example the output gate.
+- Cost: a copy proportional to the value's size on each validation. Readonly types can be awkward to pass to libraries that expect mutable arrays.
+- Alternative not taken: "trusted but mutable" costs nothing, but "valid" would then only mean "was valid at the gate". That leaves a time-of-check to time-of-use gap once authorization runs between validation and the handler.
+
+Tests: `tests/types/mutation.test.ts`.
+
+## D6. Type identity (§12)
+
+**Decision: the runtime descriptor is the type.** Every constructor call returns a new, frozen descriptor. Two separately constructed descriptors are distinct types, even with identical definitions. Reusing one descriptor in several places means the same type everywhere.
+
+Identity is not structural, but inspection is: equivalent definitions produce equal inspections. Compatibility checks or caching can compare inspections structurally when that is what they need.
+
+Only descriptors created by the gates constructors are protocol types. Descriptor classes use private fields, so they are nominal at compile time. At runtime they check a module-private construction token and are registered in a private `WeakSet` (`isType`). Zod schemas, look-alike objects and objects created from `Type.prototype` are all rejected.
+
+Tests: `tests/types/identity.test.ts`.
+
+## D7. Validation result and error model (§9, §16)
+
+```ts
+type ValidationResult<T> =
+  | { ok: true; value: T }            // T is deeply readonly, value is a frozen copy
+  | { ok: false; issues: Issue[] }
+
+interface Issue {
+  code: "invalid_type" | "not_finite" | "missing_field" | "unknown_field" | "undefined_field"
+  path: (string | number)[]  // from the root, e.g. ["members", 1, "email"]
+  type: Inspection           // the violated type; for field issues, the struct
+  expected: string           // e.g. "string", "finite number", "field present"
+  received: string           // a description such as "number", "NaN", "absent", "instance of Date"
+}
+```
+
+- `validate(Type, value)` and `Type.validate(value)` are equivalent. Neither throws for invalid input, and neither coerces.
+- All issues in a struct are reported together. Issue order is deterministic for a given input but not otherwise meaningful.
+- `received` describes the value rather than echoing it, so errors cannot leak secrets from input.
+- Results and issues are frozen.
+
+Tests: `tests/types/struct.test.ts` ("error model"), `tests/types/primitives.test.ts` ("no coercion").
+
+## D8. Static/runtime correspondence (§8)
+
+The following constraints are represented exactly in TypeScript. The compiler and the validator agree on them:
+
+- primitive kinds
+- required vs optional fields (with `exactOptionalPropertyTypes`)
+- `null` vs absence vs `undefined`
+- list element types
+- unknown fields in fresh object literals
+- readonly-ness of validated values
+
+These constraints can only be enforced at runtime. The compiler accepts values the validator rejects, and the runtime is authoritative at the boundary:
+
+- `NaN`, `Infinity`, `-Infinity`
+- unknown fields on objects that are not fresh literals (TypeScript only checks excess properties on literals)
+- class instances whose fields match a struct
+- holes in sparse arrays
+
+There is no known case where the validator accepts a value the compiler rejects.
+
+Tests: `tests/types/correspondence.test.ts` checks every case twice. `bun run typecheck` checks the compile-time verdict through type assertions and `@ts-expect-error` lines, and `bun test` checks the runtime verdict.
+
+## D9. Inspection (§13)
+
+`Type.inspect()` or `inspect(Type)` returns frozen, JSON-compatible data derived from the descriptor:
+
+```ts
+{ kind: "string" } | { kind: "number" } | { kind: "boolean" } | { kind: "null" }
+{ kind: "list", element: Inspection }
+{ kind: "struct", fields: { [name]: Inspection | { kind: "optional", type: Inspection } } }
+```
+
+Tests: `tests/types/inspect.test.ts`.
+
+## D10. Underlying validator (§2.5)
+
+Zod is used only in `src/types/backend/zod.ts`. The backend reports *where* a value failed, and gates' own rules in `src/types/validate.ts` decide *what* the failure is, using gates' issue codes. So the semantics above are defined by gates, not by Zod. Where Zod's defaults differ (it accepts class instances as objects and treats an explicit `undefined` as absence), the backend adds gates' rules.
+
+If the backend ever rejects a value that gates' rules would accept, validation throws instead of guessing. That fails closed at the boundary and makes the disagreement visible in tests. Replacing Zod means replacing that one file.
+
+Tests: `tests/architecture/validator-isolation.test.ts` enforces that no other file in `src/` or `demos/` imports Zod.
+
+## D11. Scope
+
+The core invariants about gates (§18, items 5 and 6: inputs validated before the handler, outputs validated before release) belong to the runtime and are specified in `spec/02-routes.md`. The type system provides the `validate` contract they build on.
+
+## Invariant checklist (§18)
+
+| # | Invariant | Where it holds |
+| --- | --- | --- |
+| 1 | Schema produces a runtime contract and a TS type | `Type<T>` and `Infer`; `correspondence.test.ts` |
+| 2 | Schema is the single source of truth | `Infer` reads the type from the descriptor; no separate interfaces |
+| 3 | TS type and validator correspond | D8; `correspondence.test.ts` |
+| 4 | Every protocol type has a runtime validation contract | `Type.validate`; every constructor returns a `Type` |
+| 5 | Only valid inputs reach handlers | runtime, spec 02 |
+| 6 | Only valid outputs cross the boundary | runtime, spec 02 |
+| 7 | Types are constructed through the project's API | D6; `identity.test.ts` |
+| 8 | Semantics do not depend on the validation library | D10; `validator-isolation.test.ts` and the semantics tests |
+| 9 | Inspection is derived from the schema | D9; `inspect.ts` walks the descriptor |
+| 10 | No silent coercion | D7; `primitives.test.ts` |
+| 11 | No transport assumptions | `src/types` has no transport imports; `dependencies.test.ts` |
+| 12 | Mutation after validation is defined | D5; `mutation.test.ts` |
+| 13 | Type identity is defined | D6; `identity.test.ts` |

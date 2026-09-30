@@ -296,10 +296,14 @@ gates/
 │
 └── src/
     ├── types/
+    │   ├── index.ts        (public type API)
     │   ├── primitives.ts
     │   ├── composites.ts
     │   ├── infer.ts
-    │   └── ...
+    │   ├── validate.ts
+    │   ├── inspect.ts
+    │   ├── core.ts
+    │   └── backend/zod.ts  (the only file that imports Zod)
     │
     ├── runtime/
     │   ├── app.ts

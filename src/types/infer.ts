@@ -1,1 +1,1 @@
-export {}
+export type { Infer } from "./core"
