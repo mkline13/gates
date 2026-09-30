@@ -274,6 +274,11 @@ gates/
 ├── package.json
 ├── tsconfig.json
 │
+├── spec/
+│   ├── 01-types.md
+│   ├── 02-routes.md
+│   └── ...
+│
 ├── demos/
 │   ├── 01-types.ts
 │   ├── 02-routes.ts
