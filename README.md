@@ -405,6 +405,46 @@ The initial implementation uses:
 
 Bun is the development/runtime environment, not part of the conceptual protocol. The core library should avoid unnecessary Bun-specific APIs so that it remains portable to other JavaScript runtimes.
 
+## Getting started
+
+### Install
+
+Gates needs [Bun](https://bun.sh) 1.3 or newer. To install Bun on macOS or Linux:
+
+```sh
+curl -fsSL https://bun.sh/install | bash
+```
+
+Then clone the repository and install its dependencies:
+
+```sh
+git clone https://github.com/mkline13/gates.git
+cd gates
+bun install
+```
+
+### Run
+
+Run a demo:
+
+```sh
+bun run demos/01-types.ts
+```
+
+Only `01-types.ts` has content so far; the other demos are placeholders until their MVP step lands.
+
+Run the tests:
+
+```sh
+bun test
+```
+
+Typecheck the project:
+
+```sh
+bun run typecheck
+```
+
 ## Design principles
 
 ### The boundary owns the gates
