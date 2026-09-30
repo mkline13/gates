@@ -289,6 +289,7 @@ gates/
 │   └── 07-inspection.ts
 │
 ├── tests/
+│   ├── architecture/
 │   ├── types/
 │   ├── runtime/
 │   └── ...
@@ -311,7 +312,83 @@ gates/
         └── ...
 ```
 
-`http-server/` is reserved for a future HTTP transport adapter and is not part of the MVP.
+### Source structure
+
+`src/` separates type definitions, boundary enforcement, and transport adapters.
+
+#### `types/`
+
+`types/` defines Gates' type system. Its schemas provide both:
+
+* a TypeScript representation
+* a runtime validation contract
+
+The type system knows nothing about routes, authentication, HTTP, or application execution. Its job is to answer:
+
+> What values are valid, and what does their TypeScript type look like?
+
+#### `runtime/`
+
+`runtime/` implements the actual Gates boundary. It is responsible for:
+
+* registering routes
+* constructing requests
+* authentication
+* authorization
+* input validation
+* invoking handlers
+* output validation
+* structured errors
+* route inspection
+
+#### `http-server/`
+
+`http-server/` will eventually contain the HTTP transport adapter, translating between HTTP and the transport-independent runtime:
+
+```text
+HTTP Request → HTTP Adapter → Gates Request → Gates Runtime
+             → Gates Result → HTTP Adapter → HTTP Response
+```
+
+It may eventually handle HTTP routing, headers, cookies, request decoding, response serialization, and status codes. None of these concerns may leak into `runtime/` or `types/`.
+
+`http-server/` is reserved and is not part of the MVP.
+
+#### Dependency direction
+
+```text
+types
+  ↑
+runtime
+  ↑
+http-server
+```
+
+`runtime/` depends on `types/`; `types/` never depends on `runtime/`. Nothing in `types/` or `runtime/` depends on `http-server/`. `tests/architecture/` enforces this.
+
+#### Why this separation matters
+
+```text
+┌─────────────────────┐
+│       Types         │
+│ What is valid?      │
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│      Runtime        │
+│ What is permitted?  │
+│ What gets executed? │
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│     Transport       │
+│ How does it arrive? │
+└─────────────────────┘
+```
+
+The MVP only needs `types` + `runtime`. Later, HTTP becomes one transport adapter, and other transports can be added without changing route definitions or core boundary semantics.
 
 ## Development stack
 
